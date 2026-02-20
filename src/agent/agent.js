@@ -55,6 +55,8 @@ export class Agent {
         let taskStart = null;
         if (save_data) {
             taskStart = save_data.taskStart;
+            if (save_data.memory_bank)
+                this.memory_bank.loadJson(save_data.memory_bank);
         } else {
             taskStart = Date.now();
         }
