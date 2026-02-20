@@ -473,11 +473,13 @@ export class Agent {
         });
 
         // Time-of-day awareness: inject context messages at key times
+        // NOTE: These use history.add() instead of handleMessage() so they don't trigger
+        // separate LLM responses. The bot will see them as context on its next self-prompt.
         this.bot.on('sunrise', () => {
             this.event_logger.logTimeEvent('sunrise');
             const pos = this.bot.entity.position;
             const biome = this.bot.blockAt(pos)?.biome?.name || 'unknown';
-            this.handleMessage('system',
+            this.history.add('system',
                 `[Time: Sunrise] A new day begins. Hostile mobs will burn in sunlight. ` +
                 `You are at (${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)}) in ${biome}. ` +
                 `Health: ${Math.floor(this.bot.health)}/20, Hunger: ${Math.floor(this.bot.food)}/20. ` +
@@ -485,7 +487,7 @@ export class Agent {
             );
         });
         this.bot.on('noon', () => {
-            this.handleMessage('system',
+            this.history.add('system',
                 `[Time: Noon] Half the day has passed. Sunset is in about 5 minutes. ` +
                 `Health: ${Math.floor(this.bot.health)}/20, Hunger: ${Math.floor(this.bot.food)}/20. ` +
                 `Consider whether you should head back to base soon or continue your current task.`
@@ -502,7 +504,7 @@ export class Agent {
             } else {
                 advice = 'You have no home or bed. Consider building an emergency shelter (!buildShelter) or finding a cave. ';
             }
-            this.handleMessage('system',
+            this.history.add('system',
                 `[Time: Sunset] Night is falling! Hostile mobs will begin spawning soon. ` +
                 `Health: ${Math.floor(this.bot.health)}/20, Hunger: ${Math.floor(this.bot.food)}/20. ` +
                 advice +
@@ -510,7 +512,7 @@ export class Agent {
             );
         });
         this.bot.on('midnight', () => {
-            this.handleMessage('system',
+            this.history.add('system',
                 `[Time: Midnight] The darkest hour. Mobs are at peak spawning. ` +
                 `Health: ${Math.floor(this.bot.health)}/20. ` +
                 `Stay alert and avoid open areas unless well-equipped.`
@@ -777,7 +779,8 @@ export class Agent {
             `Top inventory: ${env.items || 'empty'}. ` +
             `Reflect briefly on your progress toward your current goal, then continue.`;
 
-        this.handleMessage('system', pulse);
+        // Context only — the self-prompter will see this on its next iteration
+        this.history.add('system', pulse);
     }
 
     _writeHealthDashboard() {
@@ -826,23 +829,23 @@ export class Agent {
             const nearbyPlayers = world.getNearbyPlayerNames(this.bot);
             const currentSet = new Set(nearbyPlayers.filter(n => n !== this.name));
 
-            // Detect players who just arrived
+            // Detect players who just arrived — context only, no LLM response triggered
             for (const name of currentSet) {
                 if (!this._nearbyPlayers.has(name)) {
                     const player = this.bot.players[name];
                     if (player?.entity) {
                         const dist = Math.floor(this.bot.entity.position.distanceTo(player.entity.position));
-                        this.handleMessage('system',
+                        this.history.add('system',
                             `[Proximity] ${name} is approaching! They are ${dist} blocks away.`
                         );
                     }
                 }
             }
 
-            // Detect players who left
+            // Detect players who left — context only
             for (const name of this._nearbyPlayers) {
                 if (!currentSet.has(name)) {
-                    this.handleMessage('system',
+                    this.history.add('system',
                         `[Proximity] ${name} has moved out of range.`
                     );
                 }

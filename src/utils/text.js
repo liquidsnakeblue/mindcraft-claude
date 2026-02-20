@@ -74,5 +74,9 @@ export function strictFormat(turns) {
     if (messages.length === 0) {
         messages.push(filler);
     }
+    // Claude API requires conversation to end with a user message (no assistant prefill)
+    if (messages.length > 0 && messages[messages.length - 1].role === 'assistant') {
+        messages.push(filler);
+    }
     return messages;
 }
