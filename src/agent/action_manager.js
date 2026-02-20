@@ -28,8 +28,8 @@ export class ActionManager {
     async stop() {
         if (!this.executing) return;
         const timeout = setTimeout(() => {
-            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
-        }, 10000);
+            this.agent.cleanKill('Code execution refused stop after 30 seconds. Killing process.');
+        }, 30000);
         while (this.executing) {
             this.agent.requestInterrupt();
             console.log('waiting for code to finish executing...');
