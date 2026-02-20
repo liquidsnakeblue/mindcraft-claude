@@ -449,12 +449,13 @@ class ModeController {
     }
 
     pause(mode_name) {
+        if (!modes_map[mode_name]) return; // mode may have been removed (e.g. cowardice)
         modes_map[mode_name].paused = true;
     }
 
     unpause(mode_name) {
         const mode = modes_map[mode_name];
-        //if  unpause func is defined and mode is currently paused
+        if (!mode) return; // mode may have been removed
         if (mode.unpause && mode.paused) {
             mode.unpause();
         }
