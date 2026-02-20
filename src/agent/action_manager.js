@@ -1,3 +1,5 @@
+import * as world from './library/world.js';
+
 export class ActionManager {
     constructor(agent) {
         this.agent = agent;
@@ -121,7 +123,8 @@ export class ActionManager {
                 this.agent.bot.emit('idle');
             }
 
-            // return action status report
+            // return action status report with current inventory
+            output += this.getInventorySnapshot();
             return { success: true, message: output, interrupted, timedout };
         } catch (err) {
             this.executing = false;
@@ -145,7 +148,20 @@ export class ActionManager {
             if (!interrupted) {
                 this.agent.bot.emit('idle');
             }
+            message += this.getInventorySnapshot();
             return { success: false, message, interrupted, timedout: false };
+        }
+    }
+
+    getInventorySnapshot() {
+        try {
+            const counts = world.getInventoryCounts(this.agent.bot);
+            const items = Object.entries(counts)
+                .map(([name, count]) => `${name}: ${count}`)
+                .join(', ');
+            return items ? `\nINVENTORY: ${items}` : '\nINVENTORY: empty';
+        } catch (err) {
+            return '';
         }
     }
 
@@ -153,7 +169,7 @@ export class ActionManager {
         const { bot } = this.agent;
         if (bot.interrupt_code && !this.timedout) return '';
         let output = bot.output;
-        const MAX_OUT = 500;
+        const MAX_OUT = 2000;
         if (output.length > MAX_OUT) {
             output = `Action output is very long (${output.length} chars) and has been shortened.\n
           First outputs:\n${output.substring(0, MAX_OUT / 2)}\n...skipping many lines.\nFinal outputs:\n ${output.substring(output.length - MAX_OUT / 2)}`;

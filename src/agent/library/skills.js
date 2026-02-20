@@ -265,8 +265,8 @@ export async function smeltItem(bot, itemName, num=1) {
         return false;
     }
     if (total < num) {
-        log(bot, `Only smelted ${total} ${mc.getItemName(smelted_item.type)}.`);
-        return false;
+        log(bot, `Partially smelted ${itemName}: got ${total} ${mc.getItemName(smelted_item.type)} out of ${num} requested.`);
+        return true;
     }
     log(bot, `Successfully smelted ${itemName}, got ${total} ${mc.getItemName(smelted_item.type)}.`);
     return true;
@@ -889,9 +889,15 @@ export async function putInChest(bot, itemName, num=-1) {
     let to_put = num === -1 ? item.count : Math.min(num, item.count);
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
     const chestContainer = await bot.openContainer(chest);
-    await chestContainer.deposit(item.type, null, to_put);
-    await chestContainer.close();
-    log(bot, `Successfully put ${to_put} ${itemName} in the chest.`);
+    try {
+        await chestContainer.deposit(item.type, null, to_put);
+        await chestContainer.close();
+        log(bot, `Successfully put ${to_put} ${itemName} in the chest.`);
+    } catch (err) {
+        try { await chestContainer.close(); } catch (e) { /* ignore close error */ }
+        log(bot, `Error depositing ${itemName} into chest: ${err.message}. Some items may have transferred.`);
+        return false;
+    }
     return true;
 }
 
@@ -928,16 +934,24 @@ export async function takeFromChest(bot, itemName, num=-1) {
     // Take items from each slot until we've taken enough or run out
     for (const item of matchingItems) {
         if (remaining <= 0) break;
-        
+
         let toTakeFromSlot = Math.min(remaining, item.count);
-        await chestContainer.withdraw(item.type, null, toTakeFromSlot);
-        
-        totalTaken += toTakeFromSlot;
-        remaining -= toTakeFromSlot;
+        try {
+            await chestContainer.withdraw(item.type, null, toTakeFromSlot);
+            totalTaken += toTakeFromSlot;
+            remaining -= toTakeFromSlot;
+        } catch (err) {
+            log(bot, `Error withdrawing from chest: ${err.message}. Took ${totalTaken} items before error.`);
+            break;
+        }
     }
-    
-    await chestContainer.close();
-    log(bot, `Successfully took ${totalTaken} ${itemName} from the chest.`);
+
+    try { await chestContainer.close(); } catch (e) { /* ignore close error */ }
+    if (totalTaken > 0) {
+        log(bot, `Successfully took ${totalTaken} ${itemName} from the chest.`);
+    } else {
+        log(bot, `Failed to take ${itemName} from the chest.`);
+    }
     return totalTaken > 0;
 }
 
