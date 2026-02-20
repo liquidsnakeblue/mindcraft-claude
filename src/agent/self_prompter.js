@@ -61,18 +61,22 @@ export class SelfPrompter {
     _buildPromptMessage() {
         this.iteration_count++;
 
+        // Collect awareness from orchestrator sensors
+        const awareness = this.agent.orchestrator ? this.agent.orchestrator.flush() : '';
+
         // Every N iterations, inject a goal evolution prompt
         if (this.iteration_count % this.goalCheckInterval === 0) {
             const elapsed = Math.floor((Date.now() - (this.goalStartTime || Date.now())) / 60000);
             return `[Goal Check - ${elapsed} minutes elapsed] Your current goal is: '${this.prompt}'. ` +
                 `You have been working on this for ${this.iteration_count} iterations (~${elapsed} min). ` +
+                awareness +
                 `Assess your progress: Are you making good progress? Should you continue, adjust your approach, ` +
                 `or pivot to a different priority? If you want to change your goal, use !goal("new goal"). ` +
                 `Otherwise, continue with a command. Your next response MUST contain a command !commandName. Respond:`;
         }
 
-        // Normal self-prompt
-        return `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
+        // Normal self-prompt with awareness context
+        return `You are self-prompting with the goal: '${this.prompt}'.${awareness} Your next response MUST contain a command with this syntax: !commandName. Respond:`;
     }
 
     async startLoop() {

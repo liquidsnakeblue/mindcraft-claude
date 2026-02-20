@@ -3,6 +3,7 @@ import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 import convoManager from './conversation.js';
+import { TIER_URGENT, TIER_PASSIVE } from './orchestrator.js';
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -14,14 +15,16 @@ async function say(agent, message) {
 // it has the following fields:
 // on: whether 'update' is called every tick
 // active: whether an action has been triggered by the mode and hasn't yet finished
-// paused: whether the mode is paused by another action that overrides the behavior (eg followplayer implements its own self defense)
+// paused: whether the mode is paused by another action that overrides the behavior
+// sensor: if true, mode only observes and reports to orchestrator (never calls execute)
 // update: the function that is called every tick (if on is true)
 // when a mode is active, it will trigger an action to be performed but won't wait for it to return output
 
 // the order of this list matters! first modes will be prioritized
-// while update functions are async, they should *not* be awaited longer than ~100ms as it will block the update loop
-// to perform longer actions, use the execute function which won't block the update loop
+// while update functions are async, they should *not* be awaited longer than ~100ms
+// Tier 1 modes use execute() for immediate safety. Sensor modes use orchestrator.addStimulus().
 const modes_list = [
+    // === TIER 1: Immediate Safety (hardcoded, no LLM needed) ===
     {
         name: 'self_preservation',
         description: 'Respond to drowning, burning, and damage at low health. Interrupts all actions.',
@@ -100,7 +103,7 @@ const modes_list = [
         max_stuck_time: 20,
         prev_dig_block: null,
         update: async function (agent) {
-            if (agent.isIdle()) { 
+            if (agent.isIdle()) {
                 this.prev_location = null;
                 this.stuck_time = 0;
                 return; // don't get stuck when idle
@@ -137,109 +140,90 @@ const modes_list = [
             this.prev_dig_block = null;
         }
     },
-    {
-        name: 'cowardice',
-        description: 'Run away from enemies. Interrupts all actions.',
-        interrupts: ['all'],
-        on: true,
-        active: false,
-        update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 16);
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
-                say(agent, `Aaa! A ${enemy.name.replace("_", " ")}!`);
-                execute(this, agent, async () => {
-                    await skills.avoidEnemies(agent.bot, 24);
-                });
-            }
-        }
-    },
+
+    // === TIER 2: Urgent Sensors (interrupt action, LLM decides response) ===
     {
         name: 'self_defense',
-        description: 'Attack nearby enemies. Interrupts all actions.',
-        interrupts: ['all'],
+        description: 'Detect nearby hostile mobs and alert for combat decisions.',
+        interrupts: [],
         on: true,
         active: false,
+        sensor: true,
         update: async function (agent) {
             const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
             if (enemy && await world.isClearPath(agent.bot, enemy)) {
-                say(agent, `Fighting ${enemy.name}!`);
-                execute(this, agent, async () => {
-                    await skills.defendSelf(agent.bot, 8);
+                const dist = Math.floor(agent.bot.entity.position.distanceTo(enemy.position));
+                const attacking = Date.now() - agent.bot.lastDamageTime < 3000;
+                agent.orchestrator.addStimulus('combat_alert', TIER_URGENT, {
+                    entityName: enemy.name.replace(/_/g, ' '),
+                    distance: dist,
+                    attacking
                 });
+                // Report critical health alongside combat (self_preservation handles emergency flee)
+                if (agent.bot.health < 10 && attacking) {
+                    agent.orchestrator.addStimulus('health_critical', TIER_URGENT, {
+                        health: Math.floor(agent.bot.health),
+                        recentDamage: agent.bot.lastDamageTaken
+                    });
+                }
             }
         }
     },
+
+    // === TIER 3: Passive Sensors (queued for next self-prompt as awareness) ===
     {
         name: 'hunting',
-        description: 'Hunt nearby animals when idle.',
-        interrupts: ['action:followPlayer'],
+        description: 'Detect huntable animals nearby.',
+        interrupts: [],
         on: true,
         active: false,
-        cooldown: 30, // seconds between hunts to avoid starving the self-prompter
-        last_hunt: 0,
-        update: async function (agent) {
-            const now = Date.now();
-            if (now - this.last_hunt < this.cooldown * 1000) return;
+        sensor: true,
+        update: function (agent) {
             const huntable = world.getNearestEntityWhere(agent.bot, entity => mc.isHuntable(entity), 8);
-            if (huntable && await world.isClearPath(agent.bot, huntable)) {
-                this.last_hunt = now;
-                execute(this, agent, async () => {
-                    say(agent, `Hunting ${huntable.name}!`);
-                    await skills.attackEntity(agent.bot, huntable);
+            if (huntable) {
+                const dist = Math.floor(agent.bot.entity.position.distanceTo(huntable.position));
+                agent.orchestrator.addStimulus('huntable_nearby', TIER_PASSIVE, {
+                    entityName: huntable.name.replace(/_/g, ' '),
+                    distance: dist
                 });
             }
         }
     },
     {
         name: 'item_collecting',
-        description: 'Collect nearby items when idle.',
-        interrupts: ['action:followPlayer'],
+        description: 'Detect dropped items nearby.',
+        interrupts: [],
         on: true,
         active: false,
-
-        wait: 2, // number of seconds to wait after noticing an item to pick it up
-        prev_item: null,
-        noticed_at: -1,
-        update: async function (agent) {
-            let item = world.getNearestEntityWhere(agent.bot, entity => entity.name === 'item', 8);
-            let empty_inv_slots = agent.bot.inventory.emptySlotCount();
-            if (item && item !== this.prev_item && await world.isClearPath(agent.bot, item) && empty_inv_slots > 1) {
-                if (this.noticed_at === -1) {
-                    this.noticed_at = Date.now();
-                }
-                if (Date.now() - this.noticed_at > this.wait * 1000) {
-                    say(agent, `Picking up item!`);
-                    this.prev_item = item;
-                    execute(this, agent, async () => {
-                        await skills.pickupNearbyItems(agent.bot);
-                    });
-                    this.noticed_at = -1;
-                }
-            }
-            else {
-                this.noticed_at = -1;
+        sensor: true,
+        update: function (agent) {
+            const item = world.getNearestEntityWhere(agent.bot, entity => entity.name === 'item', 8);
+            const emptySlots = agent.bot.inventory.emptySlotCount();
+            if (item && emptySlots > 1) {
+                const dist = Math.floor(agent.bot.entity.position.distanceTo(item.position));
+                agent.orchestrator.addStimulus('item_nearby', TIER_PASSIVE, {
+                    distance: dist,
+                    emptySlots
+                });
             }
         }
     },
     {
         name: 'torch_placing',
-        description: 'Place torches when idle and there are no torches nearby.',
-        interrupts: ['action:followPlayer'],
+        description: 'Detect when the area is too dark for a torch.',
+        interrupts: [],
         on: true,
         active: false,
-        cooldown: 5,
-        last_place: Date.now(),
+        sensor: true,
         update: function (agent) {
             if (world.shouldPlaceTorch(agent.bot)) {
-                if (Date.now() - this.last_place < this.cooldown * 1000) return;
-                execute(this, agent, async () => {
-                    const pos = agent.bot.entity.position;
-                    await skills.placeBlock(agent.bot, 'torch', pos.x, pos.y, pos.z, 'bottom', true);
-                });
-                this.last_place = Date.now();
+                const hasTorches = agent.bot.inventory.items().some(i => i.name === 'torch');
+                agent.orchestrator.addStimulus('needs_torch', TIER_PASSIVE, { hasTorches });
             }
         }
     },
+
+    // === Non-disruptive modes (kept as-is) ===
     {
         name: 'elbow_room',
         description: 'Move away from nearby players when idle.',
@@ -261,46 +245,46 @@ const modes_list = [
             }
         }
     },
+
+    // === More Tier 3 Passive Sensors ===
     {
         name: 'food_warning',
-        description: 'Warn when food supply is critically low.',
+        description: 'Monitor food and hunger levels.',
         interrupts: [],
         on: true,
         active: false,
-        lastCheck: 0,
-        cooldown: 60000, // check every 60 seconds
+        sensor: true,
         update: function (agent) {
-            if (Date.now() - this.lastCheck < this.cooldown) return;
-            this.lastCheck = Date.now();
             const bot = agent.bot;
             const food = bot.food;
             const foodItems = bot.inventory.items().filter(item =>
                 item.name.includes('cooked') || item.name.includes('bread') ||
                 item.name.includes('apple') || item.name.includes('steak') ||
                 item.name.includes('porkchop') || item.name.includes('mutton') ||
-                item.name.includes('chicken') && !item.name.includes('raw') ||
-                item.name.includes('salmon') && !item.name.includes('raw') ||
-                item.name.includes('cod') && !item.name.includes('raw') ||
+                (item.name.includes('chicken') && !item.name.includes('raw')) ||
+                (item.name.includes('salmon') && !item.name.includes('raw')) ||
+                (item.name.includes('cod') && !item.name.includes('raw')) ||
                 item.name === 'baked_potato' || item.name === 'beetroot_soup' ||
                 item.name === 'mushroom_stew' || item.name === 'rabbit_stew' ||
                 item.name === 'golden_apple' || item.name === 'golden_carrot' ||
                 item.name === 'carrot' || item.name === 'potato'
             );
             const totalFood = foodItems.reduce((sum, item) => sum + item.count, 0);
-            if (food <= 6 && totalFood === 0) {
-                say(agent, 'I\'m very hungry and have no food! I need to find food urgently.');
-            } else if (totalFood <= 3 && totalFood > 0) {
-                say(agent, 'Food supply is running low.');
+            if (food <= 10 || totalFood <= 5) {
+                agent.orchestrator.addStimulus('food_low', TIER_PASSIVE, {
+                    foodLevel: food,
+                    foodItemCount: totalFood
+                });
             }
         }
     },
     {
         name: 'tool_durability',
-        description: 'Warn when held tool is about to break.',
+        description: 'Monitor held tool durability.',
         interrupts: [],
         on: true,
         active: false,
-        lastWarned: null,
+        sensor: true,
         update: function (agent) {
             const bot = agent.bot;
             const held = bot.heldItem;
@@ -308,35 +292,32 @@ const modes_list = [
             const durUsed = held.durabilityUsed || 0;
             const remaining = held.maxDurability - durUsed;
             const pct = remaining / held.maxDurability;
-            if (pct < 0.15 && this.lastWarned !== held.name) {
-                this.lastWarned = held.name;
-                say(agent, `My ${held.name.replace(/_/g, ' ')} is about to break! (${Math.floor(pct * 100)}% durability)`);
-            } else if (pct >= 0.15) {
-                this.lastWarned = null;
+            if (pct < 0.20) {
+                agent.orchestrator.addStimulus('tool_low_durability', TIER_PASSIVE, {
+                    toolName: held.name.replace(/_/g, ' '),
+                    durabilityPct: Math.floor(pct * 100)
+                });
             }
         }
     },
     {
         name: 'weather_awareness',
-        description: 'React to weather changes.',
+        description: 'Detect weather changes.',
         interrupts: [],
         on: true,
         active: false,
+        sensor: true,
         lastWeather: 'clear',
         update: function (agent) {
             const bot = agent.bot;
             let current = 'clear';
             if (bot.thunderState > 0) current = 'thunder';
             else if (bot.rainState > 0) current = 'rain';
-
             if (current !== this.lastWeather) {
-                if (current === 'thunder') {
-                    say(agent, 'A thunderstorm is starting! I should take shelter.');
-                } else if (current === 'rain') {
-                    say(agent, 'It\'s starting to rain.');
-                } else if (this.lastWeather !== 'clear') {
-                    say(agent, 'The weather is clearing up.');
-                }
+                agent.orchestrator.addStimulus('weather_change', TIER_PASSIVE, {
+                    weather: current,
+                    previousWeather: this.lastWeather
+                });
                 this.lastWeather = current;
             }
         }
@@ -423,7 +404,7 @@ async function execute(mode, agent, func, timeout=-1) {
     mode.active = false;
     console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
 
-    let should_reprompt = 
+    let should_reprompt =
         interrupted_action && // it interrupted a previous action
         !agent.actions.resume_func && // there is no resume function
         !agent.self_prompter.isActive() && // self prompting is not on
@@ -511,7 +492,9 @@ class ModeController {
         }
         for (let mode of modes_list) {
             let interruptible = mode.interrupts.some(i => i === 'all') || mode.interrupts.some(i => i === _agent.actions.currentActionLabel);
-            if (mode.on && !mode.paused && !mode.active && (_agent.isIdle() || interruptible)) {
+            // Sensors always run (they only observe and report, never execute actions)
+            // Non-sensor modes only run when idle or when they can interrupt the current action
+            if (mode.on && !mode.paused && !mode.active && (mode.sensor || _agent.isIdle() || interruptible)) {
                 await mode.update(_agent);
             }
             if (mode.active) break;
