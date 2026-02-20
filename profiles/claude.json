@@ -5,5 +5,9 @@
         "api": "openai",
         "url": "http://localhost:8317/v1",
         "model": "claude-opus-4-6"
+    },
+
+    "modes": {
+        "cheat": true
     }
 }
