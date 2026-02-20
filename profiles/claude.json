@@ -1,7 +1,9 @@
 {
-    "name": "claude",
+    "name": "kittyspink17",
 
-    "model": "claude-sonnet-4-20250514",
-    
-    "embedding": "openai"
+    "model": {
+        "api": "openai",
+        "url": "http://localhost:8317/v1",
+        "model": "claude-opus-4-6"
+    }
 }
