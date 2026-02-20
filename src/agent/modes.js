@@ -175,9 +175,14 @@ const modes_list = [
         interrupts: ['action:followPlayer'],
         on: true,
         active: false,
+        cooldown: 30, // seconds between hunts to avoid starving the self-prompter
+        last_hunt: 0,
         update: async function (agent) {
+            const now = Date.now();
+            if (now - this.last_hunt < this.cooldown * 1000) return;
             const huntable = world.getNearestEntityWhere(agent.bot, entity => mc.isHuntable(entity), 8);
             if (huntable && await world.isClearPath(agent.bot, huntable)) {
+                this.last_hunt = now;
                 execute(this, agent, async () => {
                     say(agent, `Hunting ${huntable.name}!`);
                     await skills.attackEntity(agent.bot, huntable);
