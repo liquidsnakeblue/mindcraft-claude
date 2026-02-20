@@ -1336,9 +1336,14 @@ export async function goToPlayer(bot, username, distance=3) {
     distance = Math.max(distance, 0.5);
     const goal = new pf.goals.GoalFollow(player, distance);
 
-    await goToGoal(bot, goal, true);
-
-    log(bot, `You have reached ${username}.`);
+    try {
+        await goToGoal(bot, goal, true);
+        log(bot, `You have reached ${username}.`);
+        return true;
+    } catch (err) {
+        log(bot, `Pathfinding to ${username} failed: ${err.message}.`);
+        return false;
+    }
 }
 
 
