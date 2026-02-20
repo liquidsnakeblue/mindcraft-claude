@@ -8,6 +8,7 @@
     },
 
     "modes": {
-        "cheat": false
+        "cheat": false,
+        "cowardice": false
     }
 }
