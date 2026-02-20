@@ -257,6 +257,110 @@ const modes_list = [
         }
     },
     {
+        name: 'food_warning',
+        description: 'Warn when food supply is critically low.',
+        interrupts: [],
+        on: true,
+        active: false,
+        lastCheck: 0,
+        cooldown: 60000, // check every 60 seconds
+        update: function (agent) {
+            if (Date.now() - this.lastCheck < this.cooldown) return;
+            this.lastCheck = Date.now();
+            const bot = agent.bot;
+            const food = bot.food;
+            const foodItems = bot.inventory.items().filter(item =>
+                item.name.includes('cooked') || item.name.includes('bread') ||
+                item.name.includes('apple') || item.name.includes('steak') ||
+                item.name.includes('porkchop') || item.name.includes('mutton') ||
+                item.name.includes('chicken') && !item.name.includes('raw') ||
+                item.name.includes('salmon') && !item.name.includes('raw') ||
+                item.name.includes('cod') && !item.name.includes('raw') ||
+                item.name === 'baked_potato' || item.name === 'beetroot_soup' ||
+                item.name === 'mushroom_stew' || item.name === 'rabbit_stew' ||
+                item.name === 'golden_apple' || item.name === 'golden_carrot' ||
+                item.name === 'carrot' || item.name === 'potato'
+            );
+            const totalFood = foodItems.reduce((sum, item) => sum + item.count, 0);
+            if (food <= 6 && totalFood === 0) {
+                say(agent, 'I\'m very hungry and have no food! I need to find food urgently.');
+            } else if (totalFood <= 3 && totalFood > 0) {
+                say(agent, 'Food supply is running low.');
+            }
+        }
+    },
+    {
+        name: 'tool_durability',
+        description: 'Warn when held tool is about to break.',
+        interrupts: [],
+        on: true,
+        active: false,
+        lastWarned: null,
+        update: function (agent) {
+            const bot = agent.bot;
+            const held = bot.heldItem;
+            if (!held || !held.maxDurability) return;
+            const durUsed = held.durabilityUsed || 0;
+            const remaining = held.maxDurability - durUsed;
+            const pct = remaining / held.maxDurability;
+            if (pct < 0.15 && this.lastWarned !== held.name) {
+                this.lastWarned = held.name;
+                say(agent, `My ${held.name.replace(/_/g, ' ')} is about to break! (${Math.floor(pct * 100)}% durability)`);
+            } else if (pct >= 0.15) {
+                this.lastWarned = null;
+            }
+        }
+    },
+    {
+        name: 'weather_awareness',
+        description: 'React to weather changes.',
+        interrupts: [],
+        on: true,
+        active: false,
+        lastWeather: 'clear',
+        update: function (agent) {
+            const bot = agent.bot;
+            let current = 'clear';
+            if (bot.thunderState > 0) current = 'thunder';
+            else if (bot.rainState > 0) current = 'rain';
+
+            if (current !== this.lastWeather) {
+                if (current === 'thunder') {
+                    say(agent, 'A thunderstorm is starting! I should take shelter.');
+                } else if (current === 'rain') {
+                    say(agent, 'It\'s starting to rain.');
+                } else if (this.lastWeather !== 'clear') {
+                    say(agent, 'The weather is clearing up.');
+                }
+                this.lastWeather = current;
+            }
+        }
+    },
+    {
+        name: 'exploration_breadcrumbs',
+        description: 'Periodically save position while traveling to create a trail.',
+        interrupts: [],
+        on: true,
+        active: false,
+        lastPos: null,
+        breadcrumbCount: 0,
+        distanceThreshold: 100, // save every 100 blocks traveled
+        update: function (agent) {
+            const pos = agent.bot.entity.position;
+            if (!this.lastPos) {
+                this.lastPos = pos.clone();
+                return;
+            }
+            const dist = pos.distanceTo(this.lastPos);
+            if (dist >= this.distanceThreshold) {
+                this.breadcrumbCount++;
+                const name = `breadcrumb_${this.breadcrumbCount}`;
+                agent.memory_bank.rememberPlace(name, Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+                this.lastPos = pos.clone();
+            }
+        }
+    },
+    {
         name: 'idle_staring',
         description: 'Animation to look around at entities when idle.',
         interrupts: [],

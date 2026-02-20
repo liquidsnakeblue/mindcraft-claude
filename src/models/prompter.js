@@ -17,6 +17,8 @@ export class Prompter {
     constructor(agent, profile) {
         this.agent = agent;
         this.profile = profile;
+        this._consecutiveErrors = 0;
+        this._lastErrorTime = 0;
         let default_profile = JSON.parse(readFileSync('./profiles/defaults/_default.json', 'utf8'));
         let base_fp = '';
         if (settings.base_profile.includes('survival')) {
@@ -218,6 +220,16 @@ export class Prompter {
         }
         let current_msg_time = this.most_recent_msg_time;
 
+        // Graceful degradation: if API has been failing, back off
+        if (this._consecutiveErrors >= 5) {
+            const backoffMs = Math.min(60000, this._consecutiveErrors * 5000);
+            if (Date.now() - (this._lastErrorTime || 0) < backoffMs) {
+                if (self_prompt) return ''; // skip self-prompts during backoff
+                console.warn(`API in degraded mode (${this._consecutiveErrors} consecutive errors). Backing off ${backoffMs/1000}s.`);
+                return 'I\'m having trouble thinking right now. My AI connection seems unstable. I\'ll keep trying.';
+            }
+        }
+
         for (let i = 0; i < 3; i++) { // try 3 times to avoid hallucinations
             await this.checkCooldown();
             if (self_prompt && current_msg_time !== this.most_recent_msg_time) {
@@ -236,9 +248,16 @@ export class Prompter {
                 }
                 console.log("Generated response:", generation);
                 await this._saveLog(prompt, messages, generation, 'conversation');
+                // Reset error counter on success
+                this._consecutiveErrors = 0;
 
             } catch (error) {
                 console.error('Error during message generation or file writing:', error);
+                this._consecutiveErrors = (this._consecutiveErrors || 0) + 1;
+                this._lastErrorTime = Date.now();
+                if (this._consecutiveErrors >= 3) {
+                    console.warn(`API degradation: ${this._consecutiveErrors} consecutive errors.`);
+                }
                 continue;
             }
 

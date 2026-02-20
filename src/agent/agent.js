@@ -1,3 +1,4 @@
+import { writeFileSync } from 'fs';
 import { History } from './history.js';
 import { Coder } from './coder.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
@@ -13,6 +14,8 @@ import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
 import { addBrowserViewer } from './vision/browser_viewer.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
+import { EventLogger } from './event_logger.js';
+import * as world from './library/world.js';
 import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
@@ -27,7 +30,9 @@ export class Agent {
         // Initialize components
         this.actions = new ActionManager(this);
         this.prompter = new Prompter(this, settings.profile);
+        // Event logger initialized after name is set (below)
         this.name = (this.prompter.getName() || '').trim();
+        this.event_logger = new EventLogger(this.name);
         console.log(`Initializing agent ${this.name}...`);
         
         // Validate Name Format
@@ -167,6 +172,20 @@ export class Agent {
 
                 console.log(this.name, 'received message from', username, ':', message);
 
+                // Track player interaction in memory
+                if (username !== 'system') {
+                    const player = this.bot.players[username];
+                    this.memory_bank.updatePlayer(username, {
+                        interaction: 'chat',
+                        detail: message.substring(0, 100),
+                        position: player?.entity ? [
+                            Math.floor(player.entity.position.x),
+                            Math.floor(player.entity.position.y),
+                            Math.floor(player.entity.position.z)
+                        ] : null
+                    });
+                }
+
                 if (convoManager.isOtherAgent(username)) {
                     console.warn('received whisper from other bot??')
                 }
@@ -213,6 +232,16 @@ export class Agent {
             }
         }
         else if (init_message) {
+            // Inject last session context if available
+            const lastSession = this.history.loadLastSessionContext();
+            if (lastSession) {
+                const sessionContext = `[Previous Session] Last played: ${lastSession.date}. ` +
+                    `Duration: ${lastSession.durationMinutes}min. ` +
+                    (lastSession.lastGoal ? `Last goal: "${lastSession.lastGoal}". ` : '') +
+                    (lastSession.savedPlaces?.length > 0 ? `Known places: ${lastSession.savedPlaces.join(', ')}. ` : '') +
+                    `Welcome back!`;
+                this.history.add('system', sessionContext);
+            }
             await this.handleMessage('system', init_message, 2);
         }
         else {
@@ -443,6 +472,97 @@ export class Agent {
             this.bot.emit('midnight');
         });
 
+        // Time-of-day awareness: inject context messages at key times
+        this.bot.on('sunrise', () => {
+            this.event_logger.logTimeEvent('sunrise');
+            const pos = this.bot.entity.position;
+            const biome = this.bot.blockAt(pos)?.biome?.name || 'unknown';
+            this.handleMessage('system',
+                `[Time: Sunrise] A new day begins. Hostile mobs will burn in sunlight. ` +
+                `You are at (${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)}) in ${biome}. ` +
+                `Health: ${Math.floor(this.bot.health)}/20, Hunger: ${Math.floor(this.bot.food)}/20. ` +
+                `Plan your day wisely.`
+            );
+        });
+        this.bot.on('noon', () => {
+            this.handleMessage('system',
+                `[Time: Noon] Half the day has passed. Sunset is in about 5 minutes. ` +
+                `Health: ${Math.floor(this.bot.health)}/20, Hunger: ${Math.floor(this.bot.food)}/20. ` +
+                `Consider whether you should head back to base soon or continue your current task.`
+            );
+        });
+        this.bot.on('sunset', () => {
+            const hasHome = !!this.memory_bank.recallPlace('home');
+            const hasBed = this.bot.inventory.items().some(i => i.name.includes('bed'));
+            let advice = '';
+            if (hasHome) {
+                advice = 'You have a home saved — use !goHome to return to safety. ';
+            } else if (hasBed) {
+                advice = 'You have a bed — find a safe spot to place it and sleep. ';
+            } else {
+                advice = 'You have no home or bed. Consider building an emergency shelter (!buildShelter) or finding a cave. ';
+            }
+            this.handleMessage('system',
+                `[Time: Sunset] Night is falling! Hostile mobs will begin spawning soon. ` +
+                `Health: ${Math.floor(this.bot.health)}/20, Hunger: ${Math.floor(this.bot.food)}/20. ` +
+                advice +
+                `If you want to continue working through the night, make sure you are well-armed and well-lit.`
+            );
+        });
+        this.bot.on('midnight', () => {
+            this.handleMessage('system',
+                `[Time: Midnight] The darkest hour. Mobs are at peak spawning. ` +
+                `Health: ${Math.floor(this.bot.health)}/20. ` +
+                `Stay alert and avoid open areas unless well-equipped.`
+            );
+        });
+
+        // Player greeting: greet players when they join the server
+        this.bot.on('playerJoined', (player) => {
+            if (player.username === this.name) return;
+            const known = this.memory_bank.getPlayer(player.username);
+            if (known) {
+                const timeSince = Math.floor((Date.now() - known.lastSeen) / 60000);
+                if (timeSince > 5) { // only greet if they've been gone > 5 min
+                    this.openChat(`Hey ${player.username}, welcome back!`);
+                }
+            } else {
+                this.openChat(`Hello ${player.username}!`);
+            }
+            this.memory_bank.updatePlayer(player.username, { interaction: 'joined' });
+        });
+
+        // Player leaving
+        this.bot.on('playerLeft', (player) => {
+            if (player.username === this.name) return;
+            this.memory_bank.updatePlayer(player.username, { interaction: 'left' });
+        });
+
+        // Emote system: occasional flavor text during idle
+        this._emoteTimer = 0;
+        this._emoteCooldown = 5 * 60 * 1000; // every 5 minutes max
+        const emotes = [
+            '/me looks around curiously',
+            '/me stretches and yawns',
+            '/me hums a tune',
+            '/me checks their inventory',
+            '/me scans the horizon',
+            '/me takes a deep breath',
+        ];
+        const weatherEmotes = [
+            '/me shivers in the rain',
+            '/me looks up at the dark clouds',
+        ];
+        const nightEmotes = [
+            '/me glances nervously into the darkness',
+            '/me listens to the sounds of the night',
+        ];
+
+        // Store emotes on agent for use in update loop
+        this._emotes = emotes;
+        this._weatherEmotes = weatherEmotes;
+        this._nightEmotes = nightEmotes;
+
         let prev_health = this.bot.health;
         this.bot.lastDamageTime = 0;
         this.bot.lastDamageTaken = 0;
@@ -477,6 +597,7 @@ export class Agent {
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
                 console.log('Agent died: ', message);
+                this.event_logger.logDeath(message, this.bot.entity.position);
                 let death_pos = this.bot.entity.position;
                 this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
                 let death_pos_text = null;
@@ -484,7 +605,13 @@ export class Agent {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.x.toFixed(2)}`;
                 }
                 let dimention = this.bot.game.dimension;
-                this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension with the final message: '${message}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`);
+                this.handleMessage('system',
+                    `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension ` +
+                    `with the final message: '${message}'. Your place of death is saved as 'last_death_position' ` +
+                    `if you want to return. Previous actions were stopped and you have respawned. ` +
+                    `REFLECT: What caused your death? What could you have done differently? ` +
+                    `Should you change your current strategy, equip better gear, or avoid certain areas?`
+                );
             }
         });
         this.bot.on('idle', () => {
@@ -500,6 +627,23 @@ export class Agent {
 
         // Init NPC controller
         this.npc.init();
+
+        // Auto-save heartbeat: save memory every 5 minutes to prevent data loss on crash
+        this._lastAutoSave = Date.now();
+
+        // Context pulse: inject environment awareness every 3 minutes
+        this._lastContextPulse = Date.now();
+        this._contextPulseInterval = 3 * 60 * 1000; // 3 minutes
+
+        // Player proximity tracking
+        this._nearbyPlayers = new Set();
+        this._proximityCheckInterval = 5000; // check every 5 seconds
+        this._lastProximityCheck = Date.now();
+        this._playerProximityRange = 32;
+
+        // Idle creativity: generate own goal after extended idle
+        this._idleCreativityTime = 0;
+        this._idleCreativityThreshold = 60 * 1000; // 60 seconds of total idle before generating goal
 
         // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
         const INTERVAL = 300;
@@ -523,6 +667,191 @@ export class Agent {
         await this.bot.modes.update();
         this.self_prompter.update(delta);
         await this.checkTaskDone();
+
+        const now = Date.now();
+
+        // Auto-save heartbeat + health dashboard
+        if (now - this._lastAutoSave >= 5 * 60 * 1000) {
+            this._lastAutoSave = now;
+            try {
+                this.history.save();
+                this._writeHealthDashboard();
+                console.log('Auto-save heartbeat: memory saved.');
+            } catch (err) {
+                console.error('Auto-save failed:', err.message);
+            }
+        }
+
+        // Context pulse: periodic environment awareness
+        if (now - this._lastContextPulse >= this._contextPulseInterval) {
+            this._lastContextPulse = now;
+            this._injectContextPulse();
+        }
+
+        // Player proximity awareness
+        if (now - this._lastProximityCheck >= this._proximityCheckInterval) {
+            this._lastProximityCheck = now;
+            this._checkPlayerProximity();
+        }
+
+        // Emote system: flavor text during idle
+        this._emoteTimer += delta;
+        if (this._emoteTimer >= this._emoteCooldown && this.isIdle() && Math.random() < 0.3) {
+            this._emoteTimer = 0;
+            let pool = this._emotes;
+            if (this.bot.rainState > 0) pool = pool.concat(this._weatherEmotes);
+            if (this.bot.time.timeOfDay >= 13000) pool = pool.concat(this._nightEmotes);
+            const emote = pool[Math.floor(Math.random() * pool.length)];
+            this.bot.chat(emote);
+        }
+
+        // Idle creativity: if no goal and idle too long, generate one
+        if (this.isIdle() && this.self_prompter.isStopped()) {
+            this._idleCreativityTime += delta;
+            if (this._idleCreativityTime >= this._idleCreativityThreshold) {
+                this._idleCreativityTime = 0;
+                this._triggerIdleCreativity();
+            }
+        } else {
+            this._idleCreativityTime = 0;
+        }
+    }
+
+    _getEnvironmentSnapshot() {
+        const bot = this.bot;
+        const pos = bot.entity.position;
+        const health = Math.floor(bot.health);
+        const food = Math.floor(bot.food);
+        const timeOfDay = bot.time.timeOfDay;
+        const isRaining = bot.isRaining;
+
+        let timePhase = 'day';
+        if (timeOfDay >= 12000 && timeOfDay < 13000) timePhase = 'dusk';
+        else if (timeOfDay >= 13000 || timeOfDay < 0) timePhase = 'night';
+        else if (timeOfDay >= 0 && timeOfDay < 1000) timePhase = 'dawn';
+
+        // Inventory summary
+        const counts = world.getInventoryCounts(bot);
+        const items = Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([name, count]) => `${name}:${count}`)
+            .join(', ');
+
+        // Nearby entities
+        const nearbyEntities = world.getNearbyEntities(bot, 16);
+        const hostiles = nearbyEntities.filter(e => e.type === 'hostile' || e.type === 'mob').slice(0, 5);
+        const players = nearbyEntities.filter(e => e.type === 'player' && e.name !== this.name);
+
+        let entitySummary = '';
+        if (hostiles.length > 0)
+            entitySummary += `Hostile mobs nearby: ${hostiles.map(e => e.name || e.displayName).join(', ')}. `;
+        if (players.length > 0)
+            entitySummary += `Players nearby: ${players.map(e => e.username || e.name).join(', ')}. `;
+        if (!entitySummary) entitySummary = 'No notable entities nearby. ';
+
+        // Equipment check
+        const heldItem = bot.heldItem;
+        let equipNote = '';
+        if (heldItem && heldItem.maxDurability) {
+            const durabilityLeft = heldItem.maxDurability - (heldItem.durabilityUsed || 0);
+            const pct = Math.floor((durabilityLeft / heldItem.maxDurability) * 100);
+            if (pct < 20) equipNote = `WARNING: ${heldItem.name} is at ${pct}% durability! `;
+        }
+
+        return {
+            pos: `(${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)})`,
+            health, food, timePhase, isRaining, items, entitySummary, equipNote
+        };
+    }
+
+    _injectContextPulse() {
+        if (!this.self_prompter.isActive()) return; // only pulse during autonomous behavior
+
+        const env = this._getEnvironmentSnapshot();
+        const weatherNote = env.isRaining ? 'It is currently raining. ' : '';
+
+        const pulse = `[Context Pulse] Position: ${env.pos} | Health: ${env.health}/20 | ` +
+            `Hunger: ${env.food}/20 | Time: ${env.timePhase} | ${weatherNote}` +
+            `${env.equipNote}${env.entitySummary}` +
+            `Top inventory: ${env.items || 'empty'}. ` +
+            `Reflect briefly on your progress toward your current goal, then continue.`;
+
+        this.handleMessage('system', pulse);
+    }
+
+    _writeHealthDashboard() {
+        try {
+            const bot = this.bot;
+            const pos = bot.entity.position;
+            const stats = this.event_logger.getStats();
+            const dashboard = {
+                agent: this.name,
+                timestamp: new Date().toISOString(),
+                uptime_minutes: Math.floor(stats.uptime / 60000),
+                position: { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) },
+                health: Math.floor(bot.health),
+                hunger: Math.floor(bot.food),
+                gamemode: bot.game.gameMode,
+                dimension: bot.game.dimension,
+                current_goal: this.self_prompter.isActive() ? this.self_prompter.prompt : null,
+                is_idle: this.isIdle(),
+                stats: {
+                    actions: stats.actions,
+                    errors: stats.errors,
+                    deaths: stats.deaths
+                },
+                saved_places: Object.keys(this.memory_bank.memory),
+                inventory_count: bot.inventory.items().length
+            };
+            writeFileSync(`./bots/${this.name}/dashboard.json`, JSON.stringify(dashboard, null, 2));
+        } catch (err) {
+            // Silently fail — dashboard is non-critical
+        }
+    }
+
+    _triggerIdleCreativity() {
+        const env = this._getEnvironmentSnapshot();
+        this.handleMessage('system',
+            `[Idle - No Active Goal] You have been idle with no goal for a while. ` +
+            `Position: ${env.pos} | Health: ${env.health}/20 | Hunger: ${env.food}/20 | Time: ${env.timePhase}. ` +
+            `Inventory: ${env.items || 'empty'}. ` +
+            `Based on your situation, decide what to do next and set a goal with !goal("your new goal"). ` +
+            `Consider: exploring, gathering resources, building, or preparing for challenges.`
+        );
+    }
+
+    _checkPlayerProximity() {
+        try {
+            const nearbyPlayers = world.getNearbyPlayerNames(this.bot);
+            const currentSet = new Set(nearbyPlayers.filter(n => n !== this.name));
+
+            // Detect players who just arrived
+            for (const name of currentSet) {
+                if (!this._nearbyPlayers.has(name)) {
+                    const player = this.bot.players[name];
+                    if (player?.entity) {
+                        const dist = Math.floor(this.bot.entity.position.distanceTo(player.entity.position));
+                        this.handleMessage('system',
+                            `[Proximity] ${name} is approaching! They are ${dist} blocks away.`
+                        );
+                    }
+                }
+            }
+
+            // Detect players who left
+            for (const name of this._nearbyPlayers) {
+                if (!currentSet.has(name)) {
+                    this.handleMessage('system',
+                        `[Proximity] ${name} has moved out of range.`
+                    );
+                }
+            }
+
+            this._nearbyPlayers = currentSet;
+        } catch (err) {
+            // Silently ignore proximity check errors
+        }
     }
 
     isIdle() {
@@ -534,6 +863,7 @@ export class Agent {
         this.history.add('system', msg);
         this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
         this.history.save();
+        this.history.saveSessionJournal();
         process.exit(code);
     }
     async checkTaskDone() {

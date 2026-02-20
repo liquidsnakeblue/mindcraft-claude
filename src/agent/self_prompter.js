@@ -10,6 +10,9 @@ export class SelfPrompter {
         this.prompt = '';
         this.idle_time = 0;
         this.cooldown = 2000;
+        this.iteration_count = 0;
+        this.goalCheckInterval = 20; // evaluate goal every 20 iterations (~40 seconds of active work)
+        this.goalStartTime = null;
     }
 
     start(prompt) {
@@ -21,6 +24,8 @@ export class SelfPrompter {
         }
         this.state = ACTIVE;
         this.prompt = prompt;
+        this.iteration_count = 0;
+        this.goalStartTime = Date.now();
         this.startLoop();
     }
 
@@ -53,6 +58,23 @@ export class SelfPrompter {
         this.state = PAUSED;
     }
 
+    _buildPromptMessage() {
+        this.iteration_count++;
+
+        // Every N iterations, inject a goal evolution prompt
+        if (this.iteration_count % this.goalCheckInterval === 0) {
+            const elapsed = Math.floor((Date.now() - (this.goalStartTime || Date.now())) / 60000);
+            return `[Goal Check - ${elapsed} minutes elapsed] Your current goal is: '${this.prompt}'. ` +
+                `You have been working on this for ${this.iteration_count} iterations (~${elapsed} min). ` +
+                `Assess your progress: Are you making good progress? Should you continue, adjust your approach, ` +
+                `or pivot to a different priority? If you want to change your goal, use !goal("new goal"). ` +
+                `Otherwise, continue with a command. Your next response MUST contain a command !commandName. Respond:`;
+        }
+
+        // Normal self-prompt
+        return `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
+    }
+
     async startLoop() {
         if (this.loop_active) {
             console.warn('Self-prompt loop is already active. Ignoring request.');
@@ -63,8 +85,8 @@ export class SelfPrompter {
         let no_command_count = 0;
         const MAX_NO_COMMAND = 3;
         while (!this.interrupt) {
-            const msg = `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
-            
+            const msg = this._buildPromptMessage();
+
             let used_command = await this.agent.handleMessage('system', msg, -1);
             if (!used_command) {
                 no_command_count++;

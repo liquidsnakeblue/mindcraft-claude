@@ -494,4 +494,145 @@ export const actionsList = [
             await skills.useToolOn(agent.bot, tool_name, target);
         })
     },
+    {
+        name: '!rememberFact',
+        description: 'Save an arbitrary fact to long-term memory. Use this to remember important information.',
+        params: {
+            'key': { type: 'string', description: 'Short identifier for the fact (e.g. "diamond_location", "base_material").' },
+            'value': { type: 'string', description: 'The fact to remember.' }
+        },
+        perform: async function (agent, key, value) {
+            agent.memory_bank.rememberFact(key, value);
+            return `Remembered fact "${key}": ${value}`;
+        }
+    },
+    {
+        name: '!forgetFact',
+        description: 'Remove a saved fact from memory.',
+        params: {
+            'key': { type: 'string', description: 'The key of the fact to forget.' }
+        },
+        perform: async function (agent, key) {
+            agent.memory_bank.forgetFact(key);
+            return `Forgot fact "${key}".`;
+        }
+    },
+    {
+        name: '!setHome',
+        description: 'Save your current location as your home base.',
+        perform: async function (agent) {
+            let pos = agent.bot.entity.position;
+            agent.memory_bank.rememberPlace('home', pos.x, pos.y, pos.z);
+            return `Home set at (${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)}).`;
+        }
+    },
+    {
+        name: '!goHome',
+        description: 'Navigate back to your saved home location.',
+        perform: runAsAction(async (agent) => {
+            const home = agent.memory_bank.recallPlace('home');
+            if (!home) {
+                skills.log(agent.bot, 'No home location saved. Use !setHome first.');
+                return;
+            }
+            await skills.goToPosition(agent.bot, home[0], home[1], home[2], 2);
+        })
+    },
+    {
+        name: '!patrol',
+        description: 'Patrol between saved locations in a loop. Visits each location once then stops.',
+        params: {
+            'place_names': { type: 'string', description: 'Comma-separated list of saved place names to patrol between.' }
+        },
+        perform: runAsAction(async (agent, place_names) => {
+            const names = place_names.split(',').map(n => n.trim());
+            for (const name of names) {
+                const pos = agent.memory_bank.recallPlace(name);
+                if (!pos) {
+                    skills.log(agent.bot, `Unknown place "${name}", skipping.`);
+                    continue;
+                }
+                skills.log(agent.bot, `Patrolling to ${name}...`);
+                await skills.goToPosition(agent.bot, pos[0], pos[1], pos[2], 3);
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            skills.log(agent.bot, 'Patrol complete.');
+        })
+    },
+    {
+        name: '!buildShelter',
+        description: 'Build a quick emergency shelter around your current position using available blocks.',
+        perform: runAsAction(async (agent) => {
+            const bot = agent.bot;
+            const pos = bot.entity.position;
+            const baseX = Math.floor(pos.x);
+            const baseY = Math.floor(pos.y);
+            const baseZ = Math.floor(pos.z);
+
+            // Find building material: prefer cobblestone, then dirt, then any stone-like block
+            const buildMaterials = ['cobblestone', 'dirt', 'cobbled_deepslate', 'stone', 'oak_planks', 'spruce_planks', 'birch_planks'];
+            let material = null;
+            for (const mat of buildMaterials) {
+                const item = bot.inventory.items().find(i => i.name === mat);
+                if (item && item.count >= 20) {
+                    material = mat;
+                    break;
+                }
+            }
+            if (!material) {
+                skills.log(bot, 'Not enough building materials (need 20+ of cobblestone, dirt, or planks). Collect resources first.');
+                return;
+            }
+
+            skills.log(bot, `Building emergency shelter with ${material}...`);
+
+            // Build a 3x3x3 shelter (walls + roof, open front)
+            // Floor is at baseY, walls at baseY+1 and baseY+2, roof at baseY+3
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dz = -1; dz <= 1; dz++) {
+                    // Roof
+                    await skills.placeBlock(bot, material, baseX + dx, baseY + 3, baseZ + dz, 'bottom', true);
+                }
+            }
+            // Walls (skip front opening at dz=-1, dx=0)
+            for (let dy = 1; dy <= 2; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dz = -1; dz <= 1; dz++) {
+                        if (dx === 0 && dz === 0) continue; // interior
+                        if (dz === -1 && dx === 0) continue; // door opening
+                        if (Math.abs(dx) === 1 || Math.abs(dz) === 1) { // only walls, not interior
+                            await skills.placeBlock(bot, material, baseX + dx, baseY + dy, baseZ + dz, 'bottom', true);
+                        }
+                    }
+                }
+            }
+            skills.log(bot, 'Emergency shelter built!');
+            agent.memory_bank.rememberPlace('shelter', baseX, baseY, baseZ);
+        })
+    },
+    {
+        name: '!discardJunk',
+        description: 'Discard common junk items from inventory to free up space.',
+        perform: runAsAction(async (agent) => {
+            const bot = agent.bot;
+            const junkItems = [
+                'rotten_flesh', 'poisonous_potato', 'dead_bush',
+                'string', 'spider_eye', 'bone',
+                'gunpowder', 'phantom_membrane'
+            ];
+            let discardedCount = 0;
+            for (const junkName of junkItems) {
+                const item = bot.inventory.items().find(i => i.name === junkName);
+                if (item) {
+                    await skills.discard(bot, junkName, item.count);
+                    discardedCount += item.count;
+                }
+            }
+            if (discardedCount > 0) {
+                skills.log(bot, `Discarded ${discardedCount} junk items.`);
+            } else {
+                skills.log(bot, 'No junk items to discard.');
+            }
+        })
+    },
 ];

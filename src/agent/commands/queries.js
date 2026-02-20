@@ -225,7 +225,82 @@ export const queryList = [
         perform: async function (agent) {
             return "Saved place names: " + agent.memory_bank.getKeys();
         }
-    }, 
+    },
+    {
+        name: '!savedFacts',
+        description: 'List all saved facts, or search facts by keyword.',
+        params: {
+            'query': { type: 'string', description: 'Optional search keyword to filter facts.', optional: true }
+        },
+        perform: function (agent, query) {
+            if (query) {
+                const results = agent.memory_bank.searchFacts(query);
+                if (results.length === 0) return pad(`No facts found matching "${query}".`);
+                let res = `FACTS matching "${query}":\n`;
+                for (const r of results) {
+                    res += `- ${r.key}: ${r.value}\n`;
+                }
+                return pad(res);
+            }
+            const keys = agent.memory_bank.getFactKeys();
+            return pad(keys ? "Saved facts: " + keys : "No facts saved.");
+        }
+    },
+    {
+        name: '!playerMemory',
+        description: 'Get what you remember about a player.',
+        params: {
+            'player_name': { type: 'string', description: 'The player name to look up.' }
+        },
+        perform: function (agent, player_name) {
+            return pad(agent.memory_bank.getPlayerSummary(player_name));
+        }
+    },
+    {
+        name: '!reportStatus',
+        description: 'Get a comprehensive status report including location, health, inventory highlights, current goal, and saved places.',
+        perform: function (agent) {
+            let bot = agent.bot;
+            let pos = bot.entity.position;
+            let res = 'STATUS REPORT\n';
+            res += `Position: (${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)})\n`;
+            res += `Health: ${Math.round(bot.health)}/20 | Hunger: ${Math.round(bot.food)}/20\n`;
+            res += `Biome: ${world.getBiomeName(bot)}\n`;
+
+            // Time
+            const tod = bot.time.timeOfDay;
+            if (tod < 6000) res += 'Time: Morning\n';
+            else if (tod < 12000) res += 'Time: Afternoon\n';
+            else if (tod < 18000) res += 'Time: Evening\n';
+            else res += 'Time: Night\n';
+
+            // Current goal
+            if (agent.self_prompter.isActive()) {
+                res += `Current Goal: ${agent.self_prompter.prompt}\n`;
+            } else {
+                res += 'Current Goal: None (idle)\n';
+            }
+
+            // Inventory highlights (top 8 items)
+            let inventory = world.getInventoryCounts(bot);
+            const topItems = Object.entries(inventory)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8)
+                .map(([name, count]) => `${name}:${count}`)
+                .join(', ');
+            res += `Top Inventory: ${topItems || 'empty'}\n`;
+
+            // Saved places
+            const places = agent.memory_bank.getKeys();
+            res += `Saved Places: ${places || 'none'}\n`;
+
+            // Saved facts count
+            const factKeys = agent.memory_bank.getFactKeys();
+            res += `Saved Facts: ${factKeys || 'none'}\n`;
+
+            return pad(res);
+        }
+    },
     {
         name: '!checkBlueprintLevel',
         description: 'Check if the level is complete and what blocks still need to be placed for the blueprint',

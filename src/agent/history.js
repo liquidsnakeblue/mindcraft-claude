@@ -11,6 +11,8 @@ export class History {
         this.full_history_fp = undefined;
 
         mkdirSync(`./bots/${this.name}/histories`, { recursive: true });
+        mkdirSync(`./bots/${this.name}/journals`, { recursive: true });
+        this.sessionStartTime = Date.now();
 
         this.turns = [];
 
@@ -34,9 +36,9 @@ export class History {
         console.log("Storing memories...");
         this.memory = await this.agent.prompter.promptMemSaving(turns);
 
-        if (this.memory.length > 500) {
-            this.memory = this.memory.slice(0, 500);
-            this.memory += '...(Memory truncated to 500 chars. Compress it more next time)';
+        if (this.memory.length > 2000) {
+            this.memory = this.memory.slice(0, 2000);
+            this.memory += '...(Memory truncated to 2000 chars. Compress it more next time)';
         }
 
         console.log("Memory updated to: ", this.memory);
@@ -118,5 +120,57 @@ export class History {
     clear() {
         this.turns = [];
         this.memory = '';
+    }
+
+    saveSessionJournal() {
+        try {
+            const sessionDuration = Math.floor((Date.now() - this.sessionStartTime) / 60000);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const journalPath = `./bots/${this.name}/journals/${timestamp}.json`;
+
+            // Collect recent conversation for context
+            const recentTurns = this.turns.slice(-10);
+
+            const journal = {
+                sessionStart: new Date(this.sessionStartTime).toISOString(),
+                sessionEnd: new Date().toISOString(),
+                durationMinutes: sessionDuration,
+                memory: this.memory,
+                memoryBank: this.agent.memory_bank.getJson(),
+                lastGoal: this.agent.self_prompter.prompt || null,
+                recentActivity: recentTurns.map(t => ({
+                    role: t.role,
+                    content: t.content.substring(0, 200)
+                }))
+            };
+
+            writeFileSync(journalPath, JSON.stringify(journal, null, 2));
+            console.log(`Session journal saved to: ${journalPath}`);
+
+            // Also save a "last_session" summary for quick loading
+            const summaryPath = `./bots/${this.name}/last_session.json`;
+            const summary = {
+                date: new Date().toISOString(),
+                durationMinutes: sessionDuration,
+                lastGoal: journal.lastGoal,
+                savedPlaces: Object.keys(this.agent.memory_bank.memory),
+                savedFacts: Object.keys(this.agent.memory_bank.facts),
+                playerInteractions: Object.keys(this.agent.memory_bank.players)
+            };
+            writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
+        } catch (err) {
+            console.error('Failed to save session journal:', err.message);
+        }
+    }
+
+    loadLastSessionContext() {
+        try {
+            const summaryPath = `./bots/${this.name}/last_session.json`;
+            if (!existsSync(summaryPath)) return null;
+            return JSON.parse(readFileSync(summaryPath, 'utf8'));
+        } catch (err) {
+            console.error('Failed to load last session:', err.message);
+            return null;
+        }
     }
 }
