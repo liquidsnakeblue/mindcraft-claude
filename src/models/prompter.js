@@ -210,13 +210,17 @@ export class Prompter {
         this.last_prompt_time = Date.now();
     }
 
-    async promptConvo(messages) {
-        this.most_recent_msg_time = Date.now();
+    async promptConvo(messages, self_prompt = false) {
+        // Only player messages update the timestamp — this lets them preempt self-prompt responses.
+        // Self-prompt calls do NOT update the timestamp, so they can never preempt player responses.
+        if (!self_prompt) {
+            this.most_recent_msg_time = Date.now();
+        }
         let current_msg_time = this.most_recent_msg_time;
 
         for (let i = 0; i < 3; i++) { // try 3 times to avoid hallucinations
             await this.checkCooldown();
-            if (current_msg_time !== this.most_recent_msg_time) {
+            if (self_prompt && current_msg_time !== this.most_recent_msg_time) {
                 return '';
             }
 
@@ -244,8 +248,8 @@ export class Prompter {
                 continue;
             }
 
-            if (current_msg_time !== this.most_recent_msg_time) {
-                console.warn(`${this.agent.name} received new message while generating, discarding old response.`);
+            if (self_prompt && current_msg_time !== this.most_recent_msg_time) {
+                console.warn(`${this.agent.name} received player message while self-prompting, discarding self-prompt response.`);
                 return '';
             }
 
