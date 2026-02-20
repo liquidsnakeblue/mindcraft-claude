@@ -42,16 +42,24 @@ export class GPT {
                     model: model,
                     messages,
                     stop: stop_seq,
+                    stream: true,
                     ...(this.params || {})
                 };
                 if (model.includes('o1') || model.includes('o3') || model.includes('5')) {
                     delete pack.stop;
                 }
-                let completion = await this.openai.chat.completions.create(pack);
-                if (completion.choices[0].finish_reason == 'length')
-                    throw new Error('Context length exceeded'); 
+                const stream = await this.openai.chat.completions.create(pack);
+                let contentParts = [];
+                let finishReason = null;
+                for await (const chunk of stream) {
+                    const delta = chunk.choices[0]?.delta?.content;
+                    if (delta) contentParts.push(delta);
+                    if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
+                }
+                if (finishReason == 'length')
+                    throw new Error('Context length exceeded');
                 console.log('Received.');
-                res = completion.choices[0].message.content;
+                res = contentParts.join('');
             } 
             // otherwise, use responses
             else {
