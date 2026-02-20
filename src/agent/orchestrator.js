@@ -76,8 +76,15 @@ export class Orchestrator {
      * Does NOT stop the self-prompter loop — Claude sees the interrupt on next iteration.
      */
     _handleUrgentInterrupt(stimulus) {
-        // Stop current action (interrupt flags set synchronously)
-        this.agent.actions.stop();
+        // Don't interrupt if the bot is already in combat
+        const currentAction = this.agent.actions.currentActionLabel || '';
+        if (currentAction.includes('attack') || currentAction.includes('defendSelf')) {
+            // Already fighting — just add context, don't interrupt
+            console.log(`[Orchestrator] Skipping interrupt — already in combat (${currentAction})`);
+        } else {
+            // Stop current action (interrupt flags set synchronously)
+            this.agent.actions.stop();
+        }
 
         const bot = this.agent.bot;
         const health = Math.floor(bot.health);
